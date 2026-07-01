@@ -1,0 +1,28 @@
+# Environment Variables & Secrets (CRITICAL)
+.env
+.env.local
+.env.production
+.env.development
+
+# Dependency Folders
+node_modules/
+jspm_packages/
+web_modules/
+
+# Build and Compilation Outputs
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# IDE / System Specific Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

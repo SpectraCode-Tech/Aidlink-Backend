@@ -1,0 +1,188 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+
+enum Role {
+  BENEFICIARY
+  DONOR
+  PARTNER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  FAILED
+}
+
+model User {
+  id                 String              @id @default(uuid())
+  email              String              @unique
+  password           String
+  role               Role
+  createdAt          DateTime            @default(now())
+  beneficiaryProfile Beneficiary?
+  partnerProfile     FulfillmentPartner?
+}
+
+model Beneficiary {
+  id                  String               @id @default(uuid())
+  userId              String               @unique
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ninHash             String?              @unique
+  ninStatus           VerificationStatus   @default(UNVERIFIED)
+  faceMatchStatus     VerificationStatus   @default(UNVERIFIED)
+  requests            Request[]
+  fulfillmentRequests FulfillmentRequest[]
+}
+
+model FulfillmentPartner {
+  id                  String               @id @default(uuid())
+  userId              String               @unique
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                String
+  category            String
+  bankAccount         String                 
+  bankAccountName     String                 
+  bankCode            String                 
+  cacNumber           String?              @unique
+  cacStatus           VerificationStatus   @default(UNVERIFIED)
+  trustScore          Int                  @default(100)
+  claimedFulfillments FulfillmentRequest[]
+}
+
+
+enum RequestStatus {
+  PENDING_AI
+  APPROVED
+  PARTIAL_FUNDING_ALLOWED
+  RESTRICTED
+  REJECTED
+}
+
+model Request {
+  id                  String               @id @default(uuid())
+  beneficiaryId       String
+  beneficiary         Beneficiary          @relation(fields: [beneficiaryId], references: [id])
+  category            String
+  title               String
+  targetAmount        Decimal              @db.Decimal(12, 2)
+  raisedAmount        Decimal              @default(0.00) @db.Decimal(12, 2)
+  status              RequestStatus        @default(PENDING_AI)
+  documentUrl         String
+  trustScore          Int?
+  createdAt           DateTime             @default(now())
+  transactions        Transaction[]
+  fulfillmentRequests FulfillmentRequest[]
+
+  @@index([beneficiaryId])
+}
+
+model Transaction {
+  id         String   @id @default(uuid())
+  requestId  String
+  request    Request  @relation(fields: [requestId], references: [id])
+  amount     Decimal  @db.Decimal(12, 2)
+  reference  String   @unique
+  status     String
+  donorEmail String?
+  createdAt  DateTime @default(now())
+
+  @@index([requestId])
+}
+
+
+enum FulfillmentStatus {
+  PENDING
+  ASSIGNED
+  IN_TRANSIT
+  ARRIVED
+  COMPLETED
+  CANCELLED
+}
+
+model FulfillmentRequest {
+  id               String              @id @default(uuid())
+  beneficiaryId    String
+  beneficiary      Beneficiary         @relation(fields: [beneficiaryId], references: [id])
+  partnerId        String?
+  partner          FulfillmentPartner? @relation(fields: [partnerId], references: [id])
+  requestId        String?
+  request          Request?            @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  title            String
+  description      String?
+  deliveryAddress  String
+  latitude         Float?
+  longitude        Float?
+  status           FulfillmentStatus   @default(PENDING)
+  verificationCode String
+  proofUrl         String?
+  payoutSettled    Boolean             @default(false)
+  payoutReference  String?               
+  logs             FulfillmentLog[]
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@index([status])
+  @@index([beneficiaryId])
+  @@index([partnerId])
+  @@index([requestId])
+}
+
+model FulfillmentLog {
+  id        String             @id @default(uuid())
+  requestId String
+  request   FulfillmentRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  status    FulfillmentStatus
+  changedBy String
+  notes     String?
+  createdAt DateTime           @default(now())
+
+  @@index([requestId])
+  @@index([status])
+}
+
+
+enum AccessPassStatus {
+  ACTIVE
+  USED
+  EXPIRED
+  REVOKED
+}
+
+model AccessPass {
+  id          String              @id @default(uuid())
+  creatorId   String
+  visitorName String
+  purpose     String?
+  passCode    String              @unique
+  status      AccessPassStatus    @default(ACTIVE)
+  maxUses     Int                 @default(1)
+  useCount    Int                 @default(0)
+  expiresAt   DateTime
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  accessLogs  SecurityAccessLog[]
+
+  @@index([passCode])
+  @@index([creatorId])
+}
+
+model SecurityAccessLog {
+  id           String      @id @default(uuid())
+  passId       String?
+  accessPass   AccessPass? @relation(fields: [passId], references: [id], onDelete: SetNull)
+  action       String
+  checkpointBy String
+  notes        String?
+  createdAt    DateTime    @default(now())
+
+  @@index([passId])
+}
