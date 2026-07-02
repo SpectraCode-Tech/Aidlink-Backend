@@ -2,7 +2,6 @@ import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 import crypto from "crypto";
 
-// Passing an explicit empty object overrides the out-of-sync configuration check
 const prisma = new PrismaClient({});
 
 console.log("\n🚀 Starting AidLink End-to-End System Integration Test...\n");
@@ -35,13 +34,15 @@ console.log("\n🚀 Starting AidLink End-to-End System Integration Test...\n");
       data: {
         email: `partner.${crypto.randomInt(1000, 9999)}@aidlink.com`,
         password: "hashed_secure_password",
-        role: "PARTNER",
+        role: "PARTNER", // ✅ RESTORED: Changed back to match your actual schema Role enum
         partnerProfile: {
           create: {
+            // ✅ FIX: Providing BOTH the original fields and the explicitly required 'bankAccountName'
             name: "Lagos Swift Delivery Corp",
             category: "Logistics",
             bankAccount: "0123456789",
             bankCode: "058",
+            bankAccountName: "Lagos Swift Delivery Corp LTD",
             cacStatus: "VERIFIED",
             cacNumber: `RC-${crypto.randomInt(100000, 999999)}`,
           },
@@ -54,7 +55,7 @@ console.log("\n🚀 Starting AidLink End-to-End System Integration Test...\n");
     console.log(
       `✅ Profiles generated: Beneficiary (ID: ${beneficiaryProfileId}), Partner (ID: ${partnerProfileId})`,
     );
-
+    
     // -------------------------------------------------------------
     // STEP 2: Beneficiary Spawns an Aid Request
     // -------------------------------------------------------------
