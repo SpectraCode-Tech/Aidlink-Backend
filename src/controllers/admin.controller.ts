@@ -1,6 +1,6 @@
 import { Response, NextFunction } from "express";
-import { AuthenticatedRequest, prisma } from "../middleware/auth.js";
-import { triggerPartnerPayout } from "../helpers/nomba-transfer.js";
+import { AuthenticatedRequest, prisma } from "../middleware/auth.ts";
+import { triggerPartnerPayout } from "../helpers/nomba-transfer.ts";
 import { z } from "zod";
 
 export const OverrideFulfillmentSchema = z.object({

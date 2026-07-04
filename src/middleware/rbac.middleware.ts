@@ -1,5 +1,5 @@
 import { Response, NextFunction } from "express";
-import { AuthenticatedRequest } from "./auth.js";
+import { AuthenticatedRequest } from "./auth.ts";
 
 export const restrictTo = (
   ...allowedRoles: (
