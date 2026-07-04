@@ -23,14 +23,21 @@ export const prisma = new PrismaClient({ adapter });
 
 export interface AuthenticatedUser {
   id: string;
-  role: "BENEFICIARY" | "DONOR" | "PARTNER" | "ADMIN" | "SUPER_ADMIN"; }
-
-export interface AuthenticatedRequest extends Request {
-  user?: AuthenticatedUser;
+  role: "BENEFICIARY" | "DONOR" | "PARTNER" | "ADMIN" | "SUPER_ADMIN";
 }
 
+// Global Declaration Merging for Express 5
+declare global {
+  namespace Express {
+    interface Request {
+      user?: AuthenticatedUser;
+    }
+  }
+}
+
+// Update the middleware function signature to use standard Express Request
 export const protect = (
-  req: AuthenticatedRequest,
+  req: Request,
   res: Response,
   next: NextFunction,
 ): void => {
@@ -58,7 +65,7 @@ export const protect = (
       process.env.JWT_SECRET!,
     ) as unknown as AuthenticatedUser;
 
-    req.user = decoded;
+    req.user = decoded; // Works perfectly now!
     next();
   } catch (err) {
     res.status(403).json({

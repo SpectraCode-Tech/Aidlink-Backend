@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from "express";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import { AuthenticatedRequest, prisma } from "../middleware/auth.ts";
+import { AuthenticatedRequest, prisma } from "../middleware/auth.js";
 import { z } from "zod";
 
 const SALT_ROUNDS = 12;
