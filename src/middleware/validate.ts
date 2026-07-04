@@ -1,7 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { ZodType, ZodError, z } from "zod";
 
-
 export const CreateAidRequestSchema = z.object({
   body: z.object({
     title: z
@@ -16,7 +15,6 @@ export const CreateAidRequestSchema = z.object({
   }),
 });
 
-
 export const validate = (schema: ZodType<any, any, any>) => {
   return async (
     req: Request,
@@ -25,22 +23,33 @@ export const validate = (schema: ZodType<any, any, any>) => {
   ): Promise<void> => {
     try {
       const parsed = await schema.parseAsync({
-        body: req.body,
-        query: req.query,
-        params: req.params,
+        body: req.body || {},
+        query: req.query || {},
+        params: req.params || {},
       });
 
+      // ✅ Reassigning req.body is fully supported by Express
       req.body = parsed.body ?? req.body;
-      req.query = parsed.query ?? req.query;
-      req.params = parsed.params ?? req.params;
 
-      next();
+      // ✅ Safely mutate the internal fields of req.query and req.params
+      // instead of reassigning the root properties themselves
+      if (parsed.query) {
+        Object.keys(req.query).forEach((key) => delete req.query[key]);
+        Object.assign(req.query, parsed.query);
+      }
+
+      if (parsed.params) {
+        Object.keys(req.params).forEach((key) => delete req.params[key]);
+        Object.assign(req.params, parsed.params);
+      }
+
+      return next();
     } catch (error: unknown) {
       if (error instanceof ZodError) {
         res.status(400).json({
           status: "fail",
           errors: error.issues.map((issue) => {
-                        const fieldPath =
+            const fieldPath =
               issue.path[0] === "body" ||
               issue.path[0] === "query" ||
               issue.path[0] === "params"

@@ -1,10 +1,12 @@
 import { Response, NextFunction } from "express";
 import { AuthenticatedRequest, prisma } from "../middleware/auth.js";
-import { getNombaAccessToken } from "./payments.controller.js";
-import axios from "axios";
+import { triggerPartnerPayout } from "../helpers/nomba-transfer.js";
 import crypto from "crypto";
 import { z } from "zod";
 
+// ==========================================
+// CENTRALIZED STRUCTURAL ROUTE SCHEMAS
+// ==========================================
 
 export const CreateRequestSchema = z.object({
   body: z.object({
@@ -38,70 +40,22 @@ export const FeedQuerySchema = z.object({
   }),
 });
 
+// ==========================================
+// HELPERS
+// ==========================================
 
 const generateSecureToken = (): string => {
   return crypto.randomBytes(3).toString("hex").toUpperCase();
 };
 
-const triggerPartnerPayout = async (
-  partnerId: string,
-  fulfillmentRequestId: string,
-): Promise<string> => {
-  const [partner, fulfillment] = await Promise.all([
-    prisma.fulfillmentPartner.findUnique({ where: { id: partnerId } }),
-    prisma.fulfillmentRequest.findUnique({
-      where: { id: fulfillmentRequestId },
-      include: { request: true },
-    }),
-  ]);
+// ==========================================
+// CONTROLLER ACTIONS
+// ==========================================
 
-  if (!partner) throw new Error("PARTNER_NOT_FOUND");
-  if (!fulfillment) throw new Error("FULFILLMENT_NOT_FOUND");
-
-  if (!partner.bankAccount || !partner.bankCode || !partner.bankAccountName) {
-    throw new Error("PARTNER_BANK_DETAILS_MISSING");
-  }
-
-  const payoutAmountNaira = fulfillment.request
-    ? parseFloat(fulfillment.request.targetAmount.toString())
-    : 0;
-
-  if (payoutAmountNaira <= 0) throw new Error("INVALID_PAYOUT_AMOUNT");
-
-      let merchantTxRef = fulfillment.payoutReference;
-  if (!merchantTxRef) {
-    merchantTxRef = `AL-PAYOUT-${fulfillmentRequestId}-${Date.now()}`;
-    await prisma.fulfillmentRequest.update({
-      where: { id: fulfillmentRequestId },
-      data: { payoutReference: merchantTxRef },
-    });
-  }
-
-  const accessToken = await getNombaAccessToken();
-
-      await axios.post(
-    `${process.env.NOMBA_BASE_URL}/v2/transfers/bank`,
-    {
-      amount: payoutAmountNaira,
-      accountNumber: partner.bankAccount,
-      accountName: partner.bankAccountName,
-      bankCode: partner.bankCode,
-      merchantTxRef,
-      senderName: "AidLink",
-      narration: `Delivery payout — Fulfillment ID: ${fulfillmentRequestId}`,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        accountId: process.env.NOMBA_ACCOUNT_ID,
-      },
-    },
-  );
-
-  return merchantTxRef;
-};
-
-
+/**
+ * POST /logistics/requests
+ * Beneficiary creates a new fulfillment request (requires KYC verified).
+ */
 export const createRequest = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -170,6 +124,10 @@ export const createRequest = async (
   }
 };
 
+/**
+ * PATCH /logistics/requests/:requestId/claim
+ * Partner claims a PENDING fulfillment job (atomic — prevents race conditions).
+ */
 export const claimRequest = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -254,6 +212,10 @@ export const claimRequest = async (
   }
 };
 
+/**
+ * PATCH /logistics/requests/:requestId/status
+ * Partner updates the shipment status (IN_TRANSIT / ARRIVED / CANCELLED).
+ */
 export const updateRequestStatus = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -320,6 +282,16 @@ export const updateRequestStatus = async (
   }
 };
 
+/**
+ * POST /logistics/requests/:requestId/complete
+ *
+ * Partner submits the 6-digit code obtained physically from the beneficiary.
+ * On match: marks COMPLETED, triggers Nomba v2 bank transfer to partner NUBAN.
+ *
+ * Returns "SUCCESS" immediately if Nomba confirms (200).
+ * Returns "PENDING" if Nomba is still processing (201) — payout_success webhook settles it.
+ * Returns payoutSettled: false if transfer fails — admin can retry.
+ */
 export const completeFulfillment = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -362,7 +334,8 @@ export const completeFulfillment = async (
       });
     }
 
-        await prisma.fulfillmentRequest.update({
+    // Step 1: Mark COMPLETED — payoutSettled stays false until transfer confirms
+    await prisma.fulfillmentRequest.update({
       where: { id: requestId },
       data: {
         status: "COMPLETED",
@@ -377,18 +350,44 @@ export const completeFulfillment = async (
       },
     });
 
-        try {
-      const merchantTxRef = await triggerPartnerPayout(partner.id, requestId);
+    // Step 2: Trigger Nomba v2 bank transfer
+    // Returns "SUCCESS" (200) or "PENDING" (201 — final result via payout_success webhook)
+    try {
+      const payoutStatus = await triggerPartnerPayout(partner.id, requestId);
 
-            await prisma.fulfillmentRequest.update({
+      if (payoutStatus === "SUCCESS") {
+        await prisma.fulfillmentRequest.update({
+          where: { id: requestId },
+          data: {
+            payoutSettled: true,
+            logs: {
+              create: {
+                status: "COMPLETED",
+                changedBy: "SYSTEM_NOMBA_PAYOUT",
+                notes: "Nomba transfer confirmed immediately (200).",
+              },
+            },
+          },
+        });
+
+        return res.status(200).json({
+          status: "COMPLETED",
+          payoutSettled: true,
+          message:
+            "Delivery confirmed and partner payout transferred successfully.",
+        });
+      }
+
+      // PENDING (201): Nomba is still processing
+      await prisma.fulfillmentRequest.update({
         where: { id: requestId },
         data: {
-          payoutSettled: true,
           logs: {
             create: {
               status: "COMPLETED",
               changedBy: "SYSTEM_NOMBA_PAYOUT",
-              notes: `Nomba transfer confirmed. Ref: ${merchantTxRef}`,
+              notes:
+                "Nomba transfer pending (201). Awaiting payout_success webhook.",
             },
           },
         },
@@ -396,9 +395,8 @@ export const completeFulfillment = async (
 
       return res.status(200).json({
         status: "COMPLETED",
-        payoutSettled: true,
-        message:
-          "Delivery confirmed and partner payout transferred successfully.",
+        payoutSettled: false,
+        message: "Delivery confirmed. Payout is being processed by Nomba.",
       });
     } catch (payoutError: any) {
       await prisma.fulfillmentRequest.update({
@@ -427,6 +425,10 @@ export const completeFulfillment = async (
   }
 };
 
+/**
+ * GET /logistics/feed
+ * Partner fetches available (PENDING) jobs with pagination.
+ */
 export const getAvailableJobsFeed = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -477,7 +479,8 @@ export const getAvailableJobsFeed = async (
           latitude: true,
           longitude: true,
           createdAt: true,
-                  },
+          // verificationCode intentionally excluded from feed
+        },
         orderBy: { createdAt: "desc" },
         skip,
         take: limitNum,

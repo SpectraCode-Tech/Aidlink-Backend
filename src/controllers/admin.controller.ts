@@ -1,7 +1,6 @@
 import { Response, NextFunction } from "express";
 import { AuthenticatedRequest, prisma } from "../middleware/auth.js";
-import { getNombaAccessToken } from "./payments.controller.js";
-import axios from "axios";
+import { triggerPartnerPayout } from "../helpers/nomba-transfer.js";
 import { z } from "zod";
 
 export const OverrideFulfillmentSchema = z.object({
@@ -12,68 +11,13 @@ export const OverrideFulfillmentSchema = z.object({
   }),
 });
 
+// ==========================================
+// CONTROLLER ACTIONS
+// ==========================================
 
-const triggerPartnerPayout = async (
-  partnerId: string | null,
-  fulfillmentRequestId: string,
-): Promise<string> => {
-  if (!partnerId) throw new Error("PARTNER_NOT_ASSIGNED");
-
-  const [partner, fulfillment] = await Promise.all([
-    prisma.fulfillmentPartner.findUnique({ where: { id: partnerId } }),
-    prisma.fulfillmentRequest.findUnique({
-      where: { id: fulfillmentRequestId },
-      include: { request: true },
-    }),
-  ]);
-
-  if (!partner) throw new Error("PARTNER_NOT_FOUND");
-  if (!fulfillment) throw new Error("FULFILLMENT_NOT_FOUND");
-
-  if (!partner.bankAccount || !partner.bankCode || !partner.bankAccountName) {
-    throw new Error("PARTNER_BANK_DETAILS_MISSING");
-  }
-
-  const payoutAmountNaira = fulfillment.request
-    ? parseFloat(fulfillment.request.targetAmount.toString())
-    : 0;
-
-  if (payoutAmountNaira <= 0) throw new Error("INVALID_PAYOUT_AMOUNT");
-
-    let merchantTxRef = fulfillment.payoutReference;
-  if (!merchantTxRef) {
-    merchantTxRef = `AL-ADMIN-PAYOUT-${fulfillmentRequestId}-${Date.now()}`;
-    await prisma.fulfillmentRequest.update({
-      where: { id: fulfillmentRequestId },
-      data: { payoutReference: merchantTxRef },
-    });
-  }
-
-  const accessToken = await getNombaAccessToken();
-
-    await axios.post(
-    `${process.env.NOMBA_BASE_URL}/v2/transfers/bank`,
-    {
-      amount: payoutAmountNaira,
-      accountNumber: partner.bankAccount,
-      accountName: partner.bankAccountName,
-      bankCode: partner.bankCode,
-      merchantTxRef,
-      senderName: "AidLink",
-      narration: `Admin override payout — Fulfillment ID: ${fulfillmentRequestId}`,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        accountId: process.env.NOMBA_ACCOUNT_ID,
-      },
-    },
-  );
-
-  return merchantTxRef;
-};
-
-
+/**
+ * GET /admin/metrics
+ */
 export const getSystemMetrics = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -93,7 +37,7 @@ export const getSystemMetrics = async (
       _count: { status: true },
     });
 
-        const unsettledPayouts = await prisma.fulfillmentRequest.count({
+    const unsettledPayouts = await prisma.fulfillmentRequest.count({
       where: { status: "COMPLETED", payoutSettled: false },
     });
 
@@ -115,6 +59,9 @@ export const getSystemMetrics = async (
   }
 };
 
+/**
+ * GET /admin/audit-failures
+ */
 export const getAuditLogs = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -122,9 +69,7 @@ export const getAuditLogs = async (
 ): Promise<any> => {
   try {
     const deniedSecurityLogs = await prisma.securityAccessLog.findMany({
-      where: {
-        action: { in: ["DENIED_EXPIRED", "DENIED_REUSED"] },
-      },
+      where: { action: { in: ["DENIED_EXPIRED", "DENIED_REUSED"] } },
       include: { accessPass: true },
       orderBy: { createdAt: "desc" },
       take: 50,
@@ -136,6 +81,12 @@ export const getAuditLogs = async (
   }
 };
 
+/**
+ * POST /admin/requests/:requestId/override
+ *
+ * Forces a stuck fulfillment to COMPLETED and triggers Nomba payout.
+ * Handles both immediate (200) and pending (201) transfer responses.
+ */
 export const manualOverrideFulfillment = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -185,7 +136,8 @@ export const manualOverrideFulfillment = async (
       });
     }
 
-        await prisma.fulfillmentRequest.update({
+    // Step 1: Force COMPLETED
+    await prisma.fulfillmentRequest.update({
       where: { id: requestId },
       data: {
         status: "COMPLETED",
@@ -200,7 +152,8 @@ export const manualOverrideFulfillment = async (
       },
     });
 
-        if (!targetRequest.partnerId) {
+    // Step 2: Skip payout if no partner was assigned
+    if (!targetRequest.partnerId) {
       return res.status(200).json({
         message: "Override applied. No partner was assigned — payout skipped.",
         status: "COMPLETED",
@@ -208,31 +161,55 @@ export const manualOverrideFulfillment = async (
       });
     }
 
-        try {
-      const merchantTxRef = await triggerPartnerPayout(
+    // Step 3: Attempt payout
+    try {
+      const payoutStatus = await triggerPartnerPayout(
         targetRequest.partnerId,
         requestId,
       );
 
+      if (payoutStatus === "SUCCESS") {
+        await prisma.fulfillmentRequest.update({
+          where: { id: requestId },
+          data: {
+            payoutSettled: true,
+            logs: {
+              create: {
+                status: "COMPLETED",
+                changedBy: "SYSTEM_NOMBA_PAYOUT",
+                notes: "Admin override payout confirmed by Nomba (200).",
+              },
+            },
+          },
+        });
+
+        return res.status(200).json({
+          message:
+            "Override applied and partner payout transferred successfully.",
+          status: "COMPLETED",
+          payoutSettled: true,
+        });
+      }
+
+      // PENDING (201)
       await prisma.fulfillmentRequest.update({
         where: { id: requestId },
         data: {
-          payoutSettled: true,
           logs: {
             create: {
               status: "COMPLETED",
               changedBy: "SYSTEM_NOMBA_PAYOUT",
-              notes: `Admin override payout confirmed. Ref: ${merchantTxRef}`,
+              notes:
+                "Admin override payout pending (201). Awaiting payout_success webhook.",
             },
           },
         },
       });
 
       return res.status(200).json({
-        message:
-          "Administrative override applied and partner payout transferred successfully.",
+        message: "Override applied. Payout is being processed by Nomba.",
         status: "COMPLETED",
-        payoutSettled: true,
+        payoutSettled: false,
       });
     } catch (payoutError: any) {
       await prisma.fulfillmentRequest.update({

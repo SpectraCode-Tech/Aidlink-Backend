@@ -10,6 +10,9 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET || "",
 });
 
+// ==========================================
+// CENTRALIZED ROUTE INPUT SCHEMAS
+// ==========================================
 
 export const InitializeDonationSchema = z.object({
   body: z.object({
@@ -22,8 +25,26 @@ export const InitializeDonationSchema = z.object({
   }),
 });
 
+// ==========================================
+// TOKEN CACHE
+// Nomba access tokens are short-lived. We cache them in memory
+// and only re-authenticate when the token has expired.
+// This avoids a round-trip auth call on every payment action.
+// ==========================================
+
+let cachedToken: string | null = null;
+let tokenExpiresAt: Date | null = null;
 
 export const getNombaAccessToken = async (): Promise<string> => {
+  // Return cached token if it's still valid (with 60s buffer)
+  if (cachedToken && tokenExpiresAt) {
+    const bufferMs = 60 * 1000;
+    if (new Date().getTime() < tokenExpiresAt.getTime() - bufferMs) {
+      return cachedToken;
+    }
+  }
+
+  // Auth uses client_id + client_secret (private key from Nomba dashboard)
   const authResponse = await axios.post(
     `${process.env.NOMBA_BASE_URL}/v1/auth/token/issue`,
     {
@@ -33,14 +54,24 @@ export const getNombaAccessToken = async (): Promise<string> => {
     },
     { headers: { accountId: process.env.NOMBA_ACCOUNT_ID } },
   );
-  return authResponse.data.data.access_token;
+
+  const { access_token, expiresAt } = authResponse.data.data;
+
+  // Cache the token and its expiry
+  cachedToken = access_token;
+  tokenExpiresAt = new Date(expiresAt);
+
+  return access_token;
 };
 
-const toKobo = (nairaAmount: number): number => {
-  return Math.round(nairaAmount * 100);
-};
+// ==========================================
+// CONTROLLER ACTIONS
+// ==========================================
 
-
+/**
+ * GET /payments/cloudinary-signature
+ * Returns a signed Cloudinary upload token for secure client-side invoice uploads.
+ */
 export const getCloudinarySignature = (
   req: Request,
   res: Response,
@@ -73,6 +104,19 @@ export const getCloudinarySignature = (
   }
 };
 
+/**
+ * POST /payments/donate
+ *
+ * Initializes a Nomba hosted checkout session for a donor contributing
+ * to an aid campaign.
+ *
+ * Key facts from Nomba docs:
+ * - amount is a STRING in NAIRA ("10000.00"), not an integer in Kobo
+ * - Custom data must go in `orderMetaData`, not `metadata`
+ * - callbackUrl is where Nomba redirects the donor after payment
+ * - Webhook event fired on success: "payment_success"
+ * - orderReference is appended as query param on callbackUrl redirect
+ */
 export const initializeDonation = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -81,7 +125,7 @@ export const initializeDonation = async (
   try {
     const { requestId, amount, customerEmail } = req.body;
 
-        const targetRequest = await prisma.request.findUnique({
+    const targetRequest = await prisma.request.findUnique({
       where: { id: requestId },
     });
 
@@ -102,17 +146,24 @@ export const initializeDonation = async (
     const accessToken = await getNombaAccessToken();
     const orderReference = `AL-TX-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-            const amountInKobo = toKobo(Number(amount));
+    // NAIRA STRING: Nomba checkout amount must be a decimal string in Naira
+    // e.g. 10000 → "10000.00"  NOT 1000000 (Kobo)
+    const amountAsString = Number(amount).toFixed(2);
 
-                const checkoutResponse = await axios.post(
+    const checkoutResponse = await axios.post(
       `${process.env.NOMBA_BASE_URL}/v1/checkout/order`,
       {
         order: {
           orderReference,
-          amount: amountInKobo,
+          amount: amountAsString,
           currency: "NGN",
-          customerEmail: customerEmail || "anonymous@aidlink.infrastructure",
-          metadata: { requestId },
+          customerEmail: customerEmail || "anonymous@aidlink.ng",
+          // callbackUrl: where Nomba redirects the donor after payment
+          // orderReference is appended as ?orderReference=... query param
+          callbackUrl: process.env.NOMBA_CALLBACK_URL,
+          // orderMetaData: custom envelope mirrored back in the webhook
+          // This is how we know which campaign to credit on payment_success
+          orderMetaData: { requestId },
         },
       },
       {
@@ -123,7 +174,8 @@ export const initializeDonation = async (
       },
     );
 
-        await prisma.transaction.create({
+    // Log pending transaction in Naira for our own records
+    await prisma.transaction.create({
       data: {
         requestId,
         amount: Number(amount),

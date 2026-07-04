@@ -78,7 +78,8 @@ describe("Nomba Webhook Receptor E2E Test Suite", () => {
     const headers = generateMockNombaHeaders(paymentPayload);
 
 const response = await request(app)
-  .post("/webhooks/payments/nomba-webhook")   .set(headers)
+  .post("/webhooks/payments/nomba-webhook")   
+  .set(headers)
   .send(paymentPayload);
 
         expect(response.status).toBe(200);
