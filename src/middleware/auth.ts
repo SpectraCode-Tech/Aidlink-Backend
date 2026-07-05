@@ -2,9 +2,12 @@ import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
+import pkg from "pg";
 import dotenv from "dotenv";
 
 dotenv.config();
+
+const { Pool } = pkg;
 
 if (!process.env.DATABASE_URL) {
   throw new Error("❌ CRITICAL: DATABASE_URL environment variable is missing.");
@@ -13,16 +16,14 @@ if (!process.env.JWT_SECRET) {
   throw new Error("❌ CRITICAL: JWT_SECRET environment variable is missing.");
 }
 
-// Prisma v7 REQUIRES a driver adapter — new PrismaClient() without one throws
-// PrismaPg takes the connection string directly (no Pool needed)
-// ssl.rejectUnauthorized: false is required for Supabase Session Pooler
-const adapter = new PrismaPg({
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
     rejectUnauthorized: false,
   },
 });
 
+const adapter = new PrismaPg(pool);
 export const prisma = new PrismaClient({ adapter });
 
 export interface AuthenticatedUser {
