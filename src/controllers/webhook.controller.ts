@@ -34,13 +34,12 @@ export const handleNombaWebhook = async (
   next: NextFunction,
 ): Promise<any> => {
   try {
-    // TEMP: Bypassed for testing — restore before final submission
-    // if (!verifyNombaSignature(req)) {
-    //   return res.status(401).json({
-    //     error: "Unauthorized",
-    //     message: "Invalid webhook signature.",
-    //   });
-    // }
+    if (!verifyNombaSignature(req)) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        message: "Invalid webhook signature.",
+      });
+    }
 
     const { event_type, data } = req.body;
 
