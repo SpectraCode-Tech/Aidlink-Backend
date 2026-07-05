@@ -3,7 +3,6 @@ import { AuthenticatedRequest, prisma } from "../middleware/auth.js";
 import crypto from "crypto";
 import { z } from "zod";
 
-
 export const CreatePassSchema = z.object({
   body: z.object({
     visitorName: z.string().min(2, "Visitor legal name is required."),
@@ -30,14 +29,13 @@ const generateReadableToken = (): string => {
   return token;
 };
 
-
 export const generateAccessPass = async (
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction,
 ): Promise<any> => {
   try {
-        const { visitorName, purpose, validDurationHours, maxUses } =
+    const { visitorName, purpose, validDurationHours, maxUses } =
       CreatePassSchema.parse({ body: req.body }).body;
 
     const creatorId = req.user?.id;
@@ -91,7 +89,7 @@ export const verifyAndProcessPass = async (
   next: NextFunction,
 ): Promise<any> => {
   try {
-        const { passCode, notes } = VerifyPassSchema.parse({ body: req.body }).body;
+    const { passCode, notes } = VerifyPassSchema.parse({ body: req.body }).body;
 
     const checkpointBy = req.user?.id;
     if (!checkpointBy) {
@@ -101,6 +99,7 @@ export const verifyAndProcessPass = async (
       });
     }
 
+    // Step 1: Run the validation checks and data mutation safely inside the transaction
     const verificationResult = await prisma.$transaction(async (tx) => {
       const pass = await tx.accessPass.findUnique({ where: { passCode } });
 
@@ -108,36 +107,23 @@ export const verifyAndProcessPass = async (
 
       const now = new Date();
 
-            if (now > pass.expiresAt) {
+      // Check Expiration
+      if (now > pass.expiresAt) {
         if (pass.status === "ACTIVE") {
           await tx.accessPass.update({
             where: { id: pass.id },
             data: { status: "EXPIRED" },
           });
         }
-        await tx.securityAccessLog.create({
-          data: {
-            passId: pass.id,
-            action: "DENIED_EXPIRED",
-            checkpointBy,
-            notes: notes ?? null,
-          },
-        });
-        throw new Error("PASS_EXPIRED");
+        return { denied: true, reason: "PASS_EXPIRED", passId: pass.id };
       }
 
-            if (pass.status !== "ACTIVE" || pass.useCount >= pass.maxUses) {
-        await tx.securityAccessLog.create({
-          data: {
-            passId: pass.id,
-            action: "DENIED_REUSED",
-            checkpointBy,
-            notes: notes ?? null,
-          },
-        });
-        throw new Error("PASS_UNAVAILABLE");
+      // Check Reuse / Inactive Status
+      if (pass.status !== "ACTIVE" || pass.useCount >= pass.maxUses) {
+        return { denied: true, reason: "PASS_UNAVAILABLE", passId: pass.id };
       }
 
+      // Valid pass - advance the count
       const nextUseCount = pass.useCount + 1;
       const finalStatus = nextUseCount >= pass.maxUses ? "USED" : "ACTIVE";
 
@@ -146,24 +132,62 @@ export const verifyAndProcessPass = async (
         data: { useCount: nextUseCount, status: finalStatus },
       });
 
-      await tx.securityAccessLog.create({
+      return {
+        denied: false,
+        pass: updatedPass,
+        nextUseCount,
+        maxUses: pass.maxUses,
+      };
+    });
+
+    // Step 2: Handle Denial Logging and Responses safely OUTSIDE the transaction
+    if (verificationResult.denied) {
+      await prisma.securityAccessLog.create({
         data: {
-          passId: pass.id,
-          action: "CHECK_IN",
+          passId: verificationResult.passId!,
+          action:
+            verificationResult.reason === "PASS_EXPIRED"
+              ? "DENIED_EXPIRED"
+              : "DENIED_REUSED",
           checkpointBy,
-          notes:
-            notes ?? `Successful check-in: ${nextUseCount}/${pass.maxUses}`,
+          notes: notes ?? null,
         },
       });
 
-      return updatedPass;
+      if (verificationResult.reason === "PASS_EXPIRED") {
+        return res.status(410).json({
+          accessGranted: false,
+          error: "Gone",
+          message: "This pass has expired.",
+        });
+      }
+
+      return res.status(422).json({
+        accessGranted: false,
+        error: "Unprocessable",
+        message: "This pass has already been used or is inactive.",
+      });
+    }
+
+    // Step 3: Handle Success Logging and Response safely OUTSIDE the transaction
+    const successfulPass = verificationResult.pass!;
+
+    await prisma.securityAccessLog.create({
+      data: {
+        passId: successfulPass.id,
+        action: "CHECK_IN",
+        checkpointBy,
+        notes:
+          notes ??
+          `Successful check-in: ${verificationResult.nextUseCount}/${verificationResult.maxUses}`,
+      },
     });
 
     return res.status(200).json({
       accessGranted: true,
       message: "Access confirmed.",
-      visitor: verificationResult.visitorName,
-      status: verificationResult.status,
+      visitor: successfulPass.visitorName,
+      status: successfulPass.status,
     });
   } catch (error: any) {
     if (error.message === "NOT_FOUND") {
@@ -171,20 +195,6 @@ export const verifyAndProcessPass = async (
         accessGranted: false,
         error: "NotFound",
         message: "Security pass code not found.",
-      });
-    }
-    if (error.message === "PASS_EXPIRED") {
-      return res.status(410).json({
-        accessGranted: false,
-        error: "Gone",
-        message: "This pass has expired.",
-      });
-    }
-    if (error.message === "PASS_UNAVAILABLE") {
-      return res.status(422).json({
-        accessGranted: false,
-        error: "Unprocessable",
-        message: "This pass has already been used or is inactive.",
       });
     }
     return next(error);
