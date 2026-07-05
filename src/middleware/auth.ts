@@ -16,7 +16,12 @@ if (!process.env.JWT_SECRET) {
   throw new Error("❌ CRITICAL: JWT_SECRET environment variable is missing.");
 }
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false, // Required for Supabase pooler
+  },
+});
 const adapter = new PrismaPg(pool);
 
 export const prisma = new PrismaClient({ adapter });
