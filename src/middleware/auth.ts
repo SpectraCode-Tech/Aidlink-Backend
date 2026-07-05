@@ -12,15 +12,9 @@ if (!process.env.JWT_SECRET) {
   throw new Error("❌ CRITICAL: JWT_SECRET environment variable is missing.");
 }
 
-// Remove PrismaPg adapter entirely — use Prisma's built-in connection
-// The adapter was causing TLS certificate chain errors with Supabase pooler
-export const prisma = new PrismaClient({
-  datasources: {
-    db: {
-      url: process.env.DATABASE_URL,
-    },
-  },
-});
+// Prisma v7 reads DATABASE_URL from environment automatically
+// No adapter or datasources config needed
+export const prisma = new PrismaClient();
 
 export interface AuthenticatedUser {
   id: string;
