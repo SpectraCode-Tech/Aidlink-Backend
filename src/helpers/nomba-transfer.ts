@@ -57,30 +57,44 @@ export const triggerPartnerPayout = async (
 
   const accessToken = await getNombaAccessToken();
 
-  const response = await axios.post(
-    // CORRECT: subAccountId in the URL path
-    `${process.env.NOMBA_BASE_URL}/v2/transfers/bank/${process.env.NOMBA_SUB_ACCOUNT_ID}`,
-    {
-      amount: payoutAmountNaira, // NAIRA number — NOT Kobo
-      accountNumber: partner.bankAccount,
-      accountName: partner.bankAccountName,
-      bankCode: partner.bankCode,
-      merchantTxRef,
-      senderName: "AidLink",
-      narration: `Delivery payout — Fulfillment: ${fulfillmentRequestId}`,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        accountId: process.env.NOMBA_ACCOUNT_ID, // parent account in header
+  try {
+    const response = await axios.post(
+      `${process.env.NOMBA_BASE_URL}/v2/transfers/bank/${process.env.NOMBA_SUB_ACCOUNT_ID}`,
+      {
+        amount: payoutAmountNaira,
+        accountNumber: partner.bankAccount,
+        accountName: partner.bankAccountName,
+        bankCode: partner.bankCode,
+        merchantTxRef,
+        senderName: "AidLink",
+        narration: `Delivery payout — Fulfillment: ${fulfillmentRequestId}`,
       },
-      // Must allow 201 — Nomba returns it for PENDING_BILLING transfers
-      // axios throws on non-2xx by default, which would falsely mark pending as failed
-      validateStatus: (status) => status === 200 || status === 201,
-    },
-  );
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          accountId: process.env.NOMBA_ACCOUNT_ID,
+        },
+        validateStatus: (status) => status === 200 || status === 201,
+      },
+    );
 
-  // 201 = PENDING_BILLING — final status comes via payout_success webhook
-  // 200 = SUCCESS — confirmed immediately
-  return response.status === 201 ? "PENDING" : "SUCCESS";
+    // 201 = PENDING_BILLING — final status comes via payout_success webhook
+    // 200 = SUCCESS — confirmed immediately
+    return response.status === 201 ? "PENDING" : "SUCCESS";
+  } catch (error: any) {
+    // Log the full Nomba error response for debugging
+    console.error(
+      "[NOMBA TRANSFER ERROR]",
+      JSON.stringify(
+        {
+          status: error.response?.status,
+          data: error.response?.data,
+          message: error.message,
+        },
+        null,
+        2,
+      ),
+    );
+    throw error;
+  }
 };
