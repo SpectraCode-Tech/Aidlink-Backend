@@ -58,25 +58,25 @@ export const triggerPartnerPayout = async (
   const accessToken = await getNombaAccessToken();
 
   try {
-    const response = await axios.post(
-      `${process.env.NOMBA_BASE_URL}/v2/transfers/bank/${process.env.NOMBA_SUB_ACCOUNT_ID}`,
-      {
-        amount: payoutAmountNaira,
-        accountNumber: partner.bankAccount,
-        accountName: partner.bankAccountName,
-        bankCode: partner.bankCode,
-        merchantTxRef,
-        senderName: "AidLink",
-        narration: `Delivery payout — Fulfillment: ${fulfillmentRequestId}`,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          accountId: process.env.NOMBA_ACCOUNT_ID,
-        },
-        validateStatus: (status) => status === 200 || status === 201,
-      },
-    );
+   const response = await axios.post(
+     `${process.env.NOMBA_BASE_URL}/v2/transfers/bank`, // no subAccountId in path
+     {
+       amount: payoutAmountNaira,
+       accountNumber: partner.bankAccount,
+       accountName: partner.bankAccountName,
+       bankCode: partner.bankCode,
+       merchantTxRef,
+       senderName: "AidLink",
+       narration: `Delivery payout — Fulfillment: ${fulfillmentRequestId}`,
+     },
+     {
+       headers: {
+         Authorization: `Bearer ${accessToken}`,
+         accountId: process.env.NOMBA_ACCOUNT_ID,
+       },
+       validateStatus: (status) => status === 200 || status === 201,
+     },
+   );
 
     // 201 = PENDING_BILLING — final status comes via payout_success webhook
     // 200 = SUCCESS — confirmed immediately
