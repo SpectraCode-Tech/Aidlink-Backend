@@ -4,6 +4,9 @@ import { google } from "@ai-sdk/google";
 import { generateText, Output, stepCountIs } from "ai";
 import { z } from "zod";
 
+// ==========================================
+// AI DOCUMENT VERIFICATION SCHEMA
+// ==========================================
 
 const DocumentVerificationSchema = z.object({
   isValidInvoice: z
@@ -30,7 +33,14 @@ const DocumentVerificationSchema = z.object({
     ),
 });
 
+// ==========================================
+// CONTROLLER ACTIONS
+// ==========================================
 
+/**
+ * POST /requests
+ * Beneficiary submits an aid campaign with an invoice.
+ */
 export const createAidRequest = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -47,7 +57,7 @@ export const createAidRequest = async (
         .json({ error: "Unauthorized", message: "User context missing." });
     }
 
-        const beneficiary = await prisma.beneficiary.findUnique({
+    const beneficiary = await prisma.beneficiary.findUnique({
       where: { userId },
     });
 
@@ -59,7 +69,7 @@ export const createAidRequest = async (
       });
     }
 
-        const imageResponse = await fetch(invoiceUrl);
+    const imageResponse = await fetch(invoiceUrl);
     if (!imageResponse.ok) {
       return res.status(400).json({
         error: "AssetFetchError",
@@ -70,11 +80,11 @@ export const createAidRequest = async (
     const imageBuffer = await imageResponse.arrayBuffer();
     const base64Image = Buffer.from(imageBuffer).toString("base64");
 
-            const aiResult = await generateText({
+    const aiResult = await generateText({
       model: google("gemini-2.5-flash"),
       output: Output.object({ schema: DocumentVerificationSchema }),
       temperature: 0.1,
-            stopWhen: stepCountIs(1),
+      stopWhen: stepCountIs(1),
       messages: [
         {
           role: "user",
@@ -92,9 +102,9 @@ export const createAidRequest = async (
       ],
     });
 
-        const verificationResult = aiResult.experimental_output;
+    const verificationResult = aiResult.experimental_output;
 
-        let evaluationStatus: "APPROVED" | "PARTIAL_FUNDING_ALLOWED" | "REJECTED" =
+    let evaluationStatus: "APPROVED" | "PARTIAL_FUNDING_ALLOWED" | "REJECTED" =
       "REJECTED";
     const finalScore = verificationResult.calculatedTrustScore;
 
@@ -104,7 +114,7 @@ export const createAidRequest = async (
       evaluationStatus = "PARTIAL_FUNDING_ALLOWED";
     }
 
-        const savedRequest = await prisma.request.create({
+    const savedRequest = await prisma.request.create({
       data: {
         beneficiaryId: beneficiary.id,
         title,
@@ -126,6 +136,10 @@ export const createAidRequest = async (
   }
 };
 
+/**
+ * GET /requests
+ * Public — returns all aid requests with optional filters and pagination.
+ */
 export const getAllRequests = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -178,6 +192,10 @@ export const getAllRequests = async (
   }
 };
 
+/**
+ * GET /requests/:id
+ * Public — returns a single aid request with transactions and fulfillments.
+ */
 export const getRequestById = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -209,6 +227,158 @@ export const getRequestById = async (
     }
 
     return res.status(200).json({ request: requestItem });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+/**
+ * GET /requests/dashboard/me
+ * Beneficiary dashboard — returns a summary of the authenticated beneficiary's
+ * campaigns, balances, recent transactions, and fulfillment activity.
+ */
+export const getBeneficiaryDashboard = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<any> => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json({ error: "Unauthorized", message: "User context missing." });
+    }
+
+    const beneficiary = await prisma.beneficiary.findUnique({
+      where: { userId },
+    });
+
+    if (!beneficiary) {
+      return res.status(404).json({
+        error: "NotFound",
+        message: "Beneficiary profile not found.",
+      });
+    }
+
+    // Fetch all campaigns for this beneficiary
+    const allCampaigns = await prisma.request.findMany({
+      where: { beneficiaryId: beneficiary.id },
+      include: {
+        transactions: {
+          orderBy: { createdAt: "desc" },
+        },
+        fulfillmentRequests: {
+          select: {
+            id: true,
+            status: true,
+            payoutSettled: true,
+            createdAt: true,
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    // Active campaigns — APPROVED or PARTIAL_FUNDING_ALLOWED and not yet fully delivered
+    const activeCampaigns = allCampaigns.filter(
+      (r) => r.status === "APPROVED" || r.status === "PARTIAL_FUNDING_ALLOWED",
+    );
+
+    // Total funds raised across all campaigns
+    const totalFundsRaised = allCampaigns.reduce((sum, r) => {
+      return sum + parseFloat(r.raisedAmount.toString());
+    }, 0);
+
+    // Total funds still needed (target - raised) across active campaigns
+    const totalFundsNeeded = activeCampaigns.reduce((sum, r) => {
+      const needed =
+        parseFloat(r.targetAmount.toString()) -
+        parseFloat(r.raisedAmount.toString());
+      return sum + Math.max(0, needed);
+    }, 0);
+
+    // Recent transactions across all campaigns (last 10)
+    const recentTransactions = allCampaigns
+      .flatMap((r) =>
+        r.transactions.map((t) => ({
+          ...t,
+          campaignTitle: r.title,
+          campaignId: r.id,
+        })),
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      )
+      .slice(0, 10);
+
+    // Campaign breakdown by status
+    const campaignStats = {
+      total: allCampaigns.length,
+      approved: allCampaigns.filter((r) => r.status === "APPROVED").length,
+      partialFunding: allCampaigns.filter(
+        (r) => r.status === "PARTIAL_FUNDING_ALLOWED",
+      ).length,
+      rejected: allCampaigns.filter((r) => r.status === "REJECTED").length,
+      pendingAI: allCampaigns.filter((r) => r.status === "PENDING_AI").length,
+    };
+
+    // KYC status
+    const kycStatus = {
+      ninVerified: beneficiary.ninStatus === "VERIFIED",
+      faceVerified: beneficiary.faceMatchStatus === "VERIFIED",
+      fullyVerified:
+        beneficiary.ninStatus === "VERIFIED" &&
+        beneficiary.faceMatchStatus === "VERIFIED",
+    };
+
+    return res.status(200).json({
+      dashboard: {
+        kycStatus,
+        summary: {
+          totalFundsRaised,
+          totalFundsNeeded,
+          totalCampaigns: allCampaigns.length,
+          activeCampaigns: activeCampaigns.length,
+        },
+        campaignStats,
+        activeCampaigns: activeCampaigns.map((r) => ({
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          targetAmount: r.targetAmount,
+          raisedAmount: r.raisedAmount,
+          percentageFunded:
+            Math.min(
+              100,
+              Math.round(
+                (parseFloat(r.raisedAmount.toString()) /
+                  parseFloat(r.targetAmount.toString())) *
+                  100,
+              ),
+            ) + "%",
+          status: r.status,
+          trustScore: r.trustScore,
+          createdAt: r.createdAt,
+          fulfillmentStatus:
+            r.fulfillmentRequests[0]?.status ?? "NO_FULFILLMENT",
+          payoutSettled: r.fulfillmentRequests[0]?.payoutSettled ?? false,
+        })),
+        recentTransactions,
+        allCampaigns: allCampaigns.map((r) => ({
+          id: r.id,
+          title: r.title,
+          category: r.category,
+          targetAmount: r.targetAmount,
+          raisedAmount: r.raisedAmount,
+          status: r.status,
+          trustScore: r.trustScore,
+          createdAt: r.createdAt,
+        })),
+      },
+    });
   } catch (error) {
     return next(error);
   }
